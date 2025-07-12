@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, menus
 from discord import app_commands
 from supabase import create_client, Client
 from discord.app_commands import Choice
@@ -9,6 +9,85 @@ from typing import Optional
 url = 'https://ivygaxznxndtwyziklrz.supabase.co'
 key = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml2eWdheHpueG5kdHd5emlrbHJ6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDg0NzcwMzMsImV4cCI6MjA2NDA1MzAzM30.E7B-cdA5hySuhrwIGO2UPwlA5rzJIK0HzoZq8K_l2E0'
 supabase: Client = create_client(url, key)
+
+# Clase para la paginación de la lista de equipos
+class TeamListMenu(menus.Menu):
+    def __init__(self, teams, guild, roster_cap):
+        super().__init__(timeout=60.0)
+        self.teams = teams
+        self.guild = guild
+        self.roster_cap = roster_cap
+        self.current_page = 0
+        self.max_per_page = 10  # Equipos por página
+
+    async def send_initial_message(self, ctx, channel):
+        return await channel.send(embed=self.create_embed())
+
+    def create_embed(self):
+        start_idx = self.current_page * self.max_per_page
+        end_idx = min((self.current_page + 1) * self.max_per_page, len(self.teams))
+        page_teams = self.teams[start_idx:end_idx]
+        
+        embed = discord.Embed(
+            title=f"Lista de Equipos (Página {self.current_page + 1}/{(len(self.teams) // self.max_per_page + 1})",
+            description="Estos son los equipos actuales del servidor:",
+            color=0x1abc9c
+        )
+        
+        if self.guild.icon:
+            embed.set_thumbnail(url=self.guild.icon.url)
+        
+        for row in page_teams:
+            role = self.guild.get_role(int(row['role']))
+            if not role:
+                continue
+            
+            owner_mention = "Sin dueño"
+            if row['owner']:
+                owner = self.guild.get_member(int(row['owner']))
+                owner_mention = owner.mention if owner else f"ID: {row['owner']}"
+            
+            emoji = row.get('emoji', '🏈')
+            
+            subdts = row.get('subdts', [])
+            subdt_mentions = []
+            for subdt_id in subdts:
+                subdt = self.guild.get_member(int(subdt_id))
+                if subdt:
+                    subdt_mentions.append(subdt.mention)
+            
+            team_info = f"**Rol:** {role.mention}\n"
+            team_info += f"**Dueño (DT):** {owner_mention}\n"
+            team_info += f"**Jugadores:** {len(role.members)}/{self.roster_cap}\n"
+            if subdt_mentions:
+                team_info += f"**Sub-DTs:** {', '.join(subdt_mentions)}"
+            else:
+                team_info += "**Sub-DTs:** Ninguno"
+            
+            embed.add_field(
+                name=f"{emoji} {row['name']}",
+                value=team_info,
+                inline=False
+            )
+
+        return embed
+
+    @menus.button('⬅️', position=menus.First(0))
+    async def on_previous(self, payload):
+        if self.current_page > 0:
+            self.current_page -= 1
+            await self.message.edit(embed=self.create_embed())
+
+    @menus.button('➡️', position=menus.Last(0))
+    async def on_next(self, payload):
+        if (self.current_page + 1) * self.max_per_page < len(self.teams):
+            self.current_page += 1
+            await self.message.edit(embed=self.create_embed())
+
+    @menus.button('⏹️', position=menus.Last(1))
+    async def on_stop(self, payload):
+        self.stop()
+        await self.message.delete()
 
 class Equipos(commands.Cog):
     def __init__(self, bot):
@@ -350,50 +429,9 @@ class Equipos(commands.Cog):
                 if updated_role:
                     updated_teams.append(team)
 
-            embed = discord.Embed(
-                title="Lista de Equipos",
-                description="Estos son los equipos actuales del servidor:",
-                color=0x1abc9c
-            )
-            
-            if interaction.guild.icon:
-                embed.set_thumbnail(url=interaction.guild.icon.url)
-            
-            for row in updated_teams:
-                role = interaction.guild.get_role(int(row['role']))
-                
-                if not role:
-                    continue
-                
-                owner_mention = "Sin dueño"
-                if row['owner']:
-                    owner = interaction.guild.get_member(int(row['owner']))
-                    owner_mention = owner.mention if owner else f"ID: {row['owner']}"
-                
-                emoji = row.get('emoji', '🏈')
-                
-                subdts = row.get('subdts', [])
-                subdt_mentions = []
-                for subdt_id in subdts:
-                    subdt = interaction.guild.get_member(int(subdt_id))
-                    if subdt:
-                        subdt_mentions.append(subdt.mention)
-                
-                team_info = f"**Rol:** {role.mention}\n"
-                team_info += f"**Dueño (DT):** {owner_mention}\n"
-                team_info += f"**Jugadores:** {len(role.members)}/{roster_cap}\n"
-                if subdt_mentions:
-                    team_info += f"**Sub-DTs:** {', '.join(subdt_mentions)}"
-                else:
-                    team_info += "**Sub-DTs:** Ninguno"
-                
-                embed.add_field(
-                    name=f"{emoji} {row['name']}",
-                    value=team_info,
-                    inline=False
-                )
-
-            await interaction.response.send_message(embed=embed)
+            # Usamos el nuevo sistema de paginación
+            menu = TeamListMenu(updated_teams, interaction.guild, roster_cap)
+            await menu.start(interaction)
 
         except Exception as e:
             error_embed = discord.Embed(
@@ -652,7 +690,7 @@ class Equipos(commands.Cog):
                                     subdts.append(str(usuario.id))
                                     supabase.table('teams').update({'subdts': subdts}).eq('id', self.team_data['id']).execute()
                                     
-                                    await self.cog.asignar_rol_administrativo(interaction.guild, usuario.id, emoji=False)
+                                    await self.cog.asignar_rol_administrativo(interaction.guild, usuario.id, es_dt=False)
                                     
                                     await interaction.response.send_message(
                                         f"✅ {usuario.mention} añadido como sub-DT.",
